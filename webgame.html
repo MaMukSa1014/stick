@@ -1,0 +1,1098 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { Sword, Play, Zap, Wand2, RefreshCw, Skull, Target } from 'lucide-react';
+
+const App = () => {
+  const [view, setView] = useState('game_lobby'); 
+  const [selectedClass, setSelectedClass] = useState(null); // 'knight', 'wizard', 'necromancer', 'gunner'
+  const [isGameOver, setIsGameOver] = useState(false);
+  const [finalScore, setFinalScore] = useState(0);
+  const [isGunnerUltActive, setIsGunnerUltActive] = useState(false); // player.isUltimating 우회용 React State 추가
+  const canvasRef = useRef(null);
+
+  const restartGame = () => {
+    setIsGameOver(false);
+    setIsGunnerUltActive(false);
+    const currentClass = selectedClass;
+    setSelectedClass(null);
+    setTimeout(() => {
+      setSelectedClass(currentClass);
+    }, 10);
+  };
+
+  useEffect(() => {
+    if (view !== 'game_play' || !selectedClass) return;
+
+    const canvas = canvasRef.current;
+    const ctx = canvas.getContext('2d');
+    let animationFrameId;
+
+    const GROUND_Y = 400;
+    let score = 0;
+    let frameCount = 0;
+    let screenShake = 0;
+
+    // 각 클래스별 체력 설정: 검사(20), 마법사(15), 거너(5), 네크로맨서(5)
+    const classHp = selectedClass === 'knight' ? 20 
+                  : selectedClass === 'wizard' ? 15 
+                  : selectedClass === 'gunner' ? 5 // 거너 체력 7 -> 5 하향
+                  : 5; // necromancer
+
+    const player = {
+      class: selectedClass,
+      x: 150,
+      y: GROUND_Y,
+      hp: classHp, 
+      maxHp: classHp,
+      speed: selectedClass === 'knight' ? 6 : (selectedClass === 'wizard' ? 5.5 : 5),
+      vy: 0,
+      jumpPower: -15,
+      gravity: 0.8,
+      isGrounded: true,
+      isMoving: false,
+      isAttacking: false,
+      attackFrame: 0,
+      direction: 1, 
+      animFrame: 0,
+      invincible: 0, 
+      stunned: 0, 
+      isDashing: false, 
+      dashFrame: 0,
+      dashCooldown: 0,
+      isSkilling: false, 
+      skillFrame: 0,
+      skillCooldown: 0,
+      isUltimating: false, 
+      ultimateFrame: 0,
+      ultimateCooldown: 0,
+      ultimateDuration: 0, // 저격 총 10초 유지용 타이머 (600프레임)
+      sniperCooldown: 0,   // 사격 간 딜레이 쿨타임 (45프레임)
+      alive: true,
+      // 거너 전용 스나이퍼 조준 위치
+      scopeX: 400,
+      scopeY: 250
+    };
+
+    let enemies = [];
+    let projectiles = [];
+    let effects = [];
+    let summons = []; // 소환수 및 거너 포탑 관리
+
+    const keys = { a: false, d: false, w: false, s: false, e: false, q: false, '1': false, r: false, ' ': false };
+
+    const handleKeyDown = (e) => {
+      const key = e.key.toLowerCase();
+      if (key in keys) keys[key] = true;
+      
+      if (player.stunned > 0) return;
+
+      // 궁극기 저격 모드 조작 예외 처리 (10초간 무제한 난사 구현)
+      if (player.isUltimating && player.class === 'gunner') {
+        if (key === 'e') {
+          if (player.sniperCooldown <= 0) {
+            // 저격 발사!
+            screenShake = 35;
+            const laserX = player.scopeX;
+            
+            // 레이저 수직 격발 및 범위 타격 이펙트 추가
+            effects.push({
+              type: 'snipe_laser',
+              x: laserX,
+              y: player.scopeY,
+              frame: 0
+            });
+            
+            // 저격 반경 90px 내 적 소멸 (30 대미지)
+            enemies.forEach(en => {
+              if (en.alive && Math.abs(en.x - laserX) < 90) {
+                en.hp -= 30;
+                en.invincible = 5;
+                if (en.hp <= 0) {
+                  en.alive = false;
+                  score += (en.type === 'reaper' ? 250 : (en.type === 'berserker' ? 150 : (en.type === 'archer' ? 40 : 20)));
+                }
+              }
+            });
+
+            // 격발 간 딜레이 45프레임(0.75초) 부여
+            player.sniperCooldown = 45;
+          }
+        }
+        return; 
+      }
+
+      if (['e', '1', 'r', 'q'].includes(key)) {
+        if (keys.a) player.direction = -1;
+        else if (keys.d) player.direction = 1;
+      }
+      if (e.key === ' ' && player.isGrounded && !player.isDashing) {
+        player.vy = player.jumpPower;
+        player.isGrounded = false;
+      }
+      if (key === 'e' && !player.isAttacking && !player.isDashing && !player.isSkilling && !player.isUltimating) {
+        player.isAttacking = true;
+        player.attackFrame = 0;
+      }
+      if (key === 'q' && player.dashCooldown <= 0 && !player.isDashing) {
+        player.isDashing = true;
+        player.dashFrame = 0;
+        player.invincible = 15;
+      }
+      if (key === '1' && player.skillCooldown <= 0 && !player.isDashing && !player.isAttacking && !player.isSkilling && !player.isUltimating) {
+        player.isSkilling = true;
+        player.skillFrame = 0;
+      }
+      if (key === 'r' && player.ultimateCooldown <= 0 && !player.isDashing && !player.isAttacking && !player.isSkilling && !player.isUltimating) {
+        player.isUltimating = true;
+        player.ultimateFrame = 0;
+        if (player.class === 'gunner') {
+          player.scopeX = player.x;
+          player.scopeY = GROUND_Y - 60;
+          player.ultimateDuration = 600; // 10초 카운트 다운 시작
+          player.sniperCooldown = 0;
+          setIsGunnerUltActive(true); // React State 동기화
+        }
+      }
+    };
+
+    const handleKeyUp = (e) => {
+      const key = e.key.toLowerCase();
+      if (key in keys) keys[key] = false;
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('keyup', handleKeyUp);
+
+    // 스틱맨 및 직업군 무기 렌더링
+    const drawStickman = (entity, time, color = 'white') => {
+      if (!entity.alive) return;
+      ctx.save();
+      if (entity.stunned > 0) {
+        ctx.shadowBlur = 15;
+        ctx.shadowColor = '#a855f7';
+      }
+      if (entity.invincible > 0 && entity.invincible % 4 >= 2) ctx.globalAlpha = 0.3;
+      
+      ctx.strokeStyle = color;
+      ctx.lineWidth = (entity.type === 'berserker' || entity.type === 'reaper') ? 6 : 4;
+      ctx.lineCap = 'round';
+
+      const { x, y, direction: dir, isMoving, isGrounded, isAttacking, attackFrame, type, isDashing, isSkilling, skillFrame, isUltimating, ultimateFrame, class: cls } = entity;
+      const isPlayer = entity === player;
+
+      const headRadius = type === 'berserker' ? 18 : (type === 'reaper' ? 15 : 12);
+      const bodyHeight = type === 'berserker' ? 100 : (type === 'reaper' ? 90 : 75);
+
+      // 머리 원형 그리기 (반지름 절대값 보장)
+      ctx.beginPath();
+      ctx.arc(x, y - bodyHeight, Math.abs(headRadius), 0, Math.PI * 2);
+      ctx.stroke();
+
+      if (type === 'berserker') {
+        ctx.fillStyle = '#ff0000';
+        ctx.beginPath(); ctx.arc(x - 5 * dir, y - bodyHeight, 3, 0, Math.PI * 2); ctx.fill();
+      } else if (type === 'reaper') {
+        // 사신 안광 묘사
+        ctx.fillStyle = '#ef4444';
+        ctx.beginPath(); ctx.arc(x - 4 * dir, y - bodyHeight - 2, 2.5, 0, Math.PI * 2); ctx.fill();
+        ctx.beginPath(); ctx.arc(x + 1 * dir, y - bodyHeight - 2, 2.5, 0, Math.PI * 2); ctx.fill();
+      } else if (isPlayer && cls === 'necromancer') {
+        ctx.fillStyle = '#10b981'; 
+        ctx.beginPath(); ctx.arc(x + 4 * dir, y - bodyHeight - 2, 2.5, 0, Math.PI * 2); ctx.fill();
+        ctx.beginPath(); ctx.arc(x - 1 * dir, y - bodyHeight - 2, 2.5, 0, Math.PI * 2); ctx.fill();
+      } else if (isPlayer && cls === 'gunner') {
+        // 거너 카우보이 모자 렌더링 시 hX, hY를 내부 선언
+        ctx.save();
+        const hX = x;
+        const hY = y - bodyHeight;
+        
+        // 1. 모자 챙 (Brim) - 넓은 가로 타원형 챙
+        ctx.fillStyle = '#7c2d12'; // 고풍스러운 갈색 가죽
+        ctx.strokeStyle = '#451a03';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.ellipse(hX, hY - Math.abs(headRadius) + 2, 23, 5, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+        
+        // 2. 모자 본체 (Crown) - 카우보이 모자의 움푹 팬 상단 굴곡 묘사
+        ctx.beginPath();
+        ctx.moveTo(hX - 12, hY - Math.abs(headRadius) + 2);
+        ctx.bezierCurveTo(hX - 11, hY - Math.abs(headRadius) - 16, hX - 6, hY - Math.abs(headRadius) - 22, hX - 5, hY - Math.abs(headRadius) - 18);
+        ctx.lineTo(hX + 5, hY - Math.abs(headRadius) - 18);
+        ctx.bezierCurveTo(hX + 6, hY - Math.abs(headRadius) - 22, hX + 11, hY - Math.abs(headRadius) - 16, hX + 12, hY - Math.abs(headRadius) + 2);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+
+        // 3. 모자 가죽 띠 (Yellow Band)
+        ctx.fillStyle = '#facc15'; 
+        ctx.fillRect(hX - 11, hY - Math.abs(headRadius) - 1, 22, 3);
+
+        // 선글라스 이펙트
+        ctx.fillStyle = '#0f172a';
+        ctx.fillRect(hX - (dir === 1 ? 2 : 8), hY - 4, 10, 5);
+        ctx.restore();
+      }
+
+      let p = 0;
+      if (isAttacking) p = attackFrame <= 5 ? attackFrame / 5 : 1 - (attackFrame - 5) / 10;
+      else if (isSkilling) p = skillFrame <= 8 ? skillFrame / 8 : 1 - (skillFrame - 8) / 12;
+      else if (isUltimating) p = Math.min(1, ultimateFrame / 20);
+
+      const lean = isDashing ? 20 * dir : ((isAttacking || isSkilling || isUltimating) && type !== 'archer' ? p * 20 * dir : 0);
+      const hipX = x;
+      const hipY = y - (bodyHeight * 0.4);
+      
+      ctx.beginPath(); ctx.moveTo(x, y - (bodyHeight * 0.84)); ctx.lineTo(hipX + lean * 0.2, hipY); ctx.stroke();
+
+      // 다리
+      const drawLeg = (isFront) => {
+        const phase = isFront ? 0 : Math.PI;
+        const cycle = time * 0.15 + phase;
+        let tAng = isMoving ? Math.sin(cycle) * 0.6 * dir : (isFront ? 0.1 : -0.1) * dir;
+        if (!isGrounded) tAng = (isFront ? -0.4 : 0.4) * dir;
+        const legLen = (type === 'berserker' || type === 'reaper') ? 30 : 20;
+        const kX = hipX + Math.sin(tAng) * legLen; const kY = hipY + Math.cos(tAng) * legLen;
+        const aX = kX + Math.sin(tAng - (isMoving ? 0.8 : 0.1) * dir) * legLen;
+        const aY = kY + Math.cos(tAng - (isMoving ? 0.8 : 0.1) * dir) * legLen;
+        ctx.beginPath(); ctx.moveTo(hipX, hipY); ctx.lineTo(kX, kY); ctx.lineTo(aX, aY); ctx.stroke();
+      };
+      drawLeg(false); drawLeg(true);
+
+      // 팔 및 무기
+      const drawArm = (isFrontArm) => {
+        const sX = x + lean * 0.2; const sY = y - (bodyHeight * 0.77);
+        let hX, hY;
+        if ((isAttacking || isSkilling || isUltimating) && isFrontArm) {
+          const armLen = (type === 'berserker' || type === 'reaper') ? 45 : 30;
+          const angle = (isPlayer && (cls === 'wizard' || cls === 'necromancer' || cls === 'gunner')) ? -0.2 * dir * p : (isSkilling ? -0.8 * dir * p : (isUltimating ? -1.5 : 0));
+          hX = sX + Math.cos(angle) * armLen * dir * (p + 0.5); hY = sY + Math.sin(angle) * armLen;
+        } else {
+          const phase = isFrontArm ? 0 : Math.PI;
+          const aCycle = isMoving ? Math.sin(time * 0.15 + phase) * 0.5 : 0;
+          const armLen = (type === 'berserker' || type === 'reaper') ? 35 : 25;
+          hX = sX + Math.sin(aCycle + 0.5) * armLen * dir; hY = sY + Math.cos(aCycle + 0.5) * armLen;
+        }
+        ctx.beginPath(); ctx.moveTo(sX, sY); ctx.lineTo(hX, hY); ctx.stroke();
+        
+        if (isFrontArm) {
+          ctx.save();
+          if (isPlayer) {
+            if (cls === 'knight') {
+              ctx.strokeStyle = isUltimating ? '#f87171' : (isSkilling ? '#fff' : '#facc15');
+              ctx.lineWidth = 5;
+              const sLen = isSkilling ? 60 : 45;
+              const sAng = isUltimating ? -1.5 : (isSkilling ? -0.5 : 0);
+              ctx.beginPath(); ctx.moveTo(hX, hY); ctx.lineTo(hX + Math.cos(sAng) * sLen * dir, hY + Math.sin(sAng) * sLen); ctx.stroke();
+            } else if (cls === 'wizard') {
+              ctx.strokeStyle = '#a855f7'; ctx.lineWidth = 4;
+              ctx.beginPath(); ctx.moveTo(hX, hY); ctx.lineTo(hX + 10 * dir, hY - 40); ctx.stroke();
+              ctx.fillStyle = '#e9d5ff'; ctx.beginPath(); ctx.arc(hX + 10 * dir, hY - 40, 6, 0, Math.PI * 2); ctx.fill();
+            } else if (cls === 'necromancer') {
+              ctx.strokeStyle = '#34d399'; ctx.lineWidth = 4;
+              ctx.beginPath(); ctx.moveTo(hX, hY); ctx.lineTo(hX + 8 * dir, hY - 45);
+              ctx.stroke();
+              ctx.strokeStyle = '#10b981'; ctx.lineWidth = 5;
+              ctx.beginPath(); ctx.arc(hX + 8 * dir - 15 * dir, hY - 45, 15, -Math.PI/4, Math.PI/2, dir === 1); ctx.stroke();
+            } else if (cls === 'gunner') {
+              ctx.fillStyle = '#64748b';
+              ctx.fillRect(hX, hY - 4, 15 * dir, 6);
+              ctx.fillRect(hX + (3 * dir), hY, 4 * dir, 6); 
+            }
+          } else {
+            if (type === 'berserker') {
+              ctx.strokeStyle = '#ef4444'; ctx.lineWidth = 8;
+              ctx.beginPath(); ctx.moveTo(hX, hY); ctx.lineTo(hX + 40 * dir, hY + 20); ctx.stroke();
+            } else if (type === 'reaper') {
+              // 사신의 거대 사슬 낫 무기 렌더링
+              ctx.strokeStyle = '#374151'; ctx.lineWidth = 5;
+              ctx.beginPath(); ctx.moveTo(hX, hY); ctx.lineTo(hX + 15 * dir, hY - 35); ctx.stroke();
+              ctx.strokeStyle = '#ef4444'; ctx.lineWidth = 4; 
+              ctx.beginPath(); ctx.arc(hX + 15 * dir - 15 * dir, hY - 35, 15, -Math.PI/4, Math.PI/2, dir === 1); ctx.stroke();
+            } else {
+              ctx.strokeStyle = type === 'archer' ? '#c084fc' : '#ef4444';
+              ctx.lineWidth = 4; ctx.beginPath(); ctx.moveTo(hX, hY); ctx.lineTo(hX + 30 * dir, hY + 10); ctx.stroke();
+            }
+          }
+          ctx.restore();
+        }
+      };
+      drawArm(false); drawArm(true);
+      ctx.restore();
+    };
+
+    // 소환수 및 거너 포탑 렌더링
+    const drawSummon = (sum, time) => {
+      ctx.save();
+      const dir = sum.direction;
+      
+      if (sum.type === 'skeleton_warrior') {
+        ctx.strokeStyle = '#94a3b8'; ctx.lineWidth = 3; ctx.lineCap = 'round';
+        ctx.beginPath(); ctx.arc(sum.x, sum.y - 45, 8, 0, Math.PI * 2); ctx.stroke();
+        ctx.fillStyle = '#475569';
+        ctx.beginPath(); ctx.arc(sum.x - 2 * dir, sum.y - 46, 1.5, 0, Math.PI*2); ctx.fill();
+        ctx.beginPath(); ctx.arc(sum.x + 2 * dir, sum.y - 46, 1.5, 0, Math.PI*2); ctx.fill();
+        ctx.beginPath(); ctx.moveTo(sum.x, sum.y - 37); ctx.lineTo(sum.x, sum.y - 18); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(sum.x - 6, sum.y - 32); ctx.lineTo(sum.x + 6, sum.y - 32); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(sum.x - 5, sum.y - 25); ctx.lineTo(sum.x + 5, sum.y - 25); ctx.stroke();
+        const legCycle = Math.sin(time * 0.15 + (sum.id % 2 === 0 ? 0 : Math.PI));
+        ctx.beginPath(); ctx.moveTo(sum.x, sum.y - 18); ctx.lineTo(sum.x - 6 + (sum.isMoving ? legCycle * 5 : 0), sum.y); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(sum.x, sum.y - 18); ctx.lineTo(sum.x + 6 - (sum.isMoving ? legCycle * 5 : 0), sum.y); ctx.stroke();
+        const armCycle = sum.isAttacking ? Math.sin((sum.attackFrame / 15) * Math.PI) * 20 : 0;
+        ctx.beginPath(); ctx.moveTo(sum.x, sum.y - 32); ctx.lineTo(sum.x + (15 + armCycle) * dir, sum.y - 25); ctx.stroke();
+        ctx.strokeStyle = '#64748b'; ctx.lineWidth = 4;
+        ctx.beginPath(); ctx.moveTo(sum.x + (15 + armCycle) * dir, sum.y - 25); ctx.lineTo(sum.x + (28 + armCycle) * dir, sum.y - 25); ctx.stroke();
+        ctx.fillStyle = '#334155'; ctx.fillRect(sum.x - 15, sum.y - 65, 30, 4);
+        ctx.fillStyle = '#10b981'; ctx.fillRect(sum.x - 15, sum.y - 65, (sum.hp / sum.maxHp) * 30, 4);
+      } 
+      else if (sum.type === 'skeleton_giant') {
+        ctx.strokeStyle = '#cbd5e1'; ctx.lineWidth = 6; ctx.lineCap = 'round';
+        ctx.shadowBlur = 15; ctx.shadowColor = 'rgba(16, 185, 129, 0.4)';
+        ctx.beginPath(); ctx.arc(sum.x, sum.y - 130, 24, 0, Math.PI * 2); ctx.stroke();
+        ctx.fillStyle = '#10b981';
+        ctx.beginPath(); ctx.arc(sum.x - 6 * dir, sum.y - 132, 4, 0, Math.PI*2); ctx.fill();
+        ctx.beginPath(); ctx.arc(sum.x + 6 * dir, sum.y - 132, 4, 0, Math.PI*2); ctx.fill();
+        ctx.beginPath(); ctx.moveTo(sum.x, sum.y - 106); ctx.lineTo(sum.x, sum.y - 50); ctx.stroke();
+        for (let i = 0; i < 4; i++) {
+          ctx.beginPath(); ctx.moveTo(sum.x - (25 - i*4), sum.y - 95 + i*12); ctx.lineTo(sum.x + (25 - i*4), sum.y - 95 + i*12); ctx.stroke();
+        }
+        const legCycle = Math.sin(time * 0.1) * 15;
+        ctx.beginPath(); ctx.moveTo(sum.x, sum.y - 50); ctx.lineTo(sum.x - 15 + legCycle, sum.y); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(sum.x, sum.y - 50); ctx.lineTo(sum.x + 15 - legCycle, sum.y); ctx.stroke();
+        const attackLean = sum.isAttacking ? Math.sin((sum.attackFrame / 30) * Math.PI) * 45 : 0;
+        ctx.beginPath(); ctx.moveTo(sum.x, sum.y - 95); ctx.lineTo(sum.x + (35 + attackLean) * dir, sum.y - 60); ctx.stroke();
+        ctx.strokeStyle = '#34d399'; ctx.lineWidth = 8;
+        ctx.beginPath(); ctx.moveTo(sum.x + (35 + attackLean) * dir, sum.y - 60); ctx.lineTo(sum.x + (75 + attackLean) * dir, sum.y - 95); ctx.stroke();
+        ctx.fillStyle = '#1e293b'; ctx.fillRect(sum.x - 40, sum.y - 170, 80, 8);
+        ctx.fillStyle = '#10b981'; ctx.fillRect(sum.x - 40, sum.y - 170, (sum.hp / sum.maxHp) * 80, 8);
+      }
+      else if (sum.type === 'gatling_turret') {
+        // 거너 기관총 포탑 렌더링
+        ctx.fillStyle = '#475569';
+        ctx.fillRect(sum.x - 15, sum.y - 10, 30, 10); // 받침대
+        ctx.fillStyle = '#1e293b';
+        ctx.fillRect(sum.x - 4, sum.y - 45, 8, 35); // 지지대
+        
+        ctx.save();
+        ctx.translate(sum.x, sum.y - 45);
+        ctx.fillStyle = '#0f172a';
+        ctx.fillRect(-15, -12, 30, 18); // 몸체
+        ctx.fillStyle = '#64748b';
+        // 듀얼 총열 렌더링
+        ctx.fillRect(dir === 1 ? 15 : -35, -9, 20, 4);
+        ctx.fillRect(dir === 1 ? 15 : -35, -1, 20, 4);
+        ctx.restore();
+
+        // 지속시간 텍스트 표시
+        const restSec = Math.ceil(sum.duration / 60);
+        ctx.fillStyle = '#38bdf8';
+        ctx.font = 'bold 10px monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText(`${restSec}s`, sum.x, sum.y - 70);
+      }
+      ctx.restore();
+    };
+
+    const update = () => {
+      frameCount++;
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.save();
+      if (screenShake > 0) {
+        ctx.translate((Math.random()-0.5)*screenShake, (Math.random()-0.5)*screenShake);
+        screenShake *= 0.9;
+      }
+
+      // 배경 렌더링
+      const grad = ctx.createLinearGradient(0, 0, 0, GROUND_Y);
+      grad.addColorStop(0, '#0f172a'); grad.addColorStop(1, '#1e293b');
+      ctx.fillStyle = grad; ctx.fillRect(0, 0, canvas.width, GROUND_Y);
+      ctx.fillStyle = '#020617'; ctx.fillRect(0, GROUND_Y, canvas.width, canvas.height - GROUND_Y);
+
+      // 저격 조준 상태일 때 어둠 장막 이펙트 적용
+      if (player.isUltimating && player.class === 'gunner') {
+        ctx.fillStyle = 'rgba(2, 6, 23, 0.65)';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+      }
+
+      // 적 스폰
+      if (Math.random() < 0.02 && enemies.length < 6) {
+        let type = 'melee';
+        if (score >= 2000 && Math.random() < 0.3) {
+          type = 'reaper';
+        } else if (score >= 1000 && Math.random() < 0.4) {
+          type = 'archer';
+        } else if (score >= 500 && Math.random() < 0.25) {
+          type = 'berserker';
+        }
+        
+        const spawnX = Math.random() > 0.5 ? -30 : canvas.width + 30;
+        
+        let enemyHp = 9; 
+        if (type === 'archer') enemyHp = 7;
+        if (type === 'berserker') enemyHp = 20;
+        if (type === 'reaper') enemyHp = 30;
+
+        enemies.push({
+          type, 
+          x: spawnX, 
+          y: GROUND_Y, 
+          hp: enemyHp, 
+          speed: type === 'reaper' ? 3.2 : (type === 'berserker' ? 1.8 : (type === 'melee' ? 2.2 : 2.5)), 
+          alive: true, invincible: 0,
+          isAttacking: false, attackFrame: 0, direction: 1, burst: 0
+        });
+      }
+
+      player.animFrame++;
+      if (player.invincible > 0) player.invincible--;
+      if (player.stunned > 0) player.stunned--;
+      if (player.dashCooldown > 0) player.dashCooldown--;
+      if (player.skillCooldown > 0) player.skillCooldown--;
+      if (player.ultimateCooldown > 0) player.ultimateCooldown--;
+      if (player.sniperCooldown > 0) player.sniperCooldown--; // 저격 연사 딜레이 감소
+
+      // 플레이어 제어 (스나이퍼 조준 시 본체 이동 불가)
+      if (!player.isUltimating && player.stunned <= 0) {
+        if (keys.a) { player.x -= player.speed; player.direction = -1; player.isMoving = true; }
+        else if (keys.d) { player.x += player.speed; player.direction = 1; player.isMoving = true; }
+        else { player.isMoving = false; }
+      } else if (player.isUltimating && player.class === 'gunner') {
+        player.isMoving = false;
+        const scopeSpeed = 6.5;
+        if (keys.w) player.scopeY = Math.max(50, player.scopeY - scopeSpeed);
+        if (keys.s) player.scopeY = Math.min(GROUND_Y, player.scopeY + scopeSpeed);
+        if (keys.a) player.scopeX = Math.max(30, player.scopeX - scopeSpeed);
+        if (keys.d) player.scopeX = Math.min(canvas.width - 30, player.scopeX + scopeSpeed);
+      } else {
+        player.isMoving = false;
+      }
+
+      // 대시 무적
+      if (player.isDashing) {
+        player.dashFrame++; player.x += player.direction * 15;
+        if (player.dashFrame > 12) { player.isDashing = false; player.dashCooldown = 60; }
+      }
+
+      // 일반 공격 (E)
+      if (player.isAttacking) {
+        player.attackFrame++;
+        if (player.attackFrame === 5) {
+          if (player.class === 'knight') {
+            enemies.forEach(en => { if (en.alive && Math.abs((player.x + 60 * player.direction) - en.x) < 75) { en.hp -= 10; en.invincible = 10; } });
+          } else if (player.class === 'wizard') {
+            projectiles.push({
+              type: 'fireball', x: player.x + 30 * player.direction, y: player.y - 60,
+              dir: player.direction, speed: 18, damage: 9, radius: 8, color: '#f97316' 
+            });
+          } else if (player.class === 'necromancer') {
+            projectiles.push({
+              type: 'skull_magic', x: player.x + 25 * player.direction, y: player.y - 60,
+              dir: player.direction, speed: 14, damage: 9, radius: 10, color: '#10b981'
+            });
+          } else if (player.class === 'gunner') {
+            projectiles.push({
+              type: 'bullet', x: player.x + 25 * player.direction, y: player.y - 60,
+              dir: player.direction, speed: 25, damage: 10, radius: 4, color: '#facc15'
+            });
+            screenShake = 3;
+          }
+        }
+        if (player.attackFrame > 15) player.isAttacking = false;
+      }
+
+      // 1번 스킬 
+      if (player.isSkilling) {
+        player.skillFrame++;
+        if (player.skillFrame === 8) {
+          if (player.class === 'knight') {
+            projectiles.push({ type: 'crescent_wave', x: player.x + 40 * player.direction, y: player.y - 45, dir: player.direction, speed: 12, damage: 15, radius: 50, color: '#fff' });
+            screenShake = 5;
+          } else if (player.class === 'wizard') {
+            projectiles.push({ 
+              type: 'waterbomb', x: player.x + 10 * player.direction, y: player.y - 75, 
+              dir: player.direction, speed: 5.5, damage: 15, radius: 18, color: '#3b82f6', 
+              gravity: 0.5, vy: -10 
+            });
+          } else if (player.class === 'necromancer') {
+            summons.push({
+              id: frameCount, type: 'skeleton_warrior', x: player.x - 80, y: GROUND_Y, hp: 10, maxHp: 10, damage: 7, direction: -1, isMoving: true, isAttacking: false, attackFrame: 0, alive: true
+            });
+            summons.push({
+              id: frameCount + 1, type: 'skeleton_warrior', x: player.x + 80, y: GROUND_Y, hp: 10, maxHp: 10, damage: 7, direction: 1, isMoving: true, isAttacking: false, attackFrame: 0, alive: true
+            });
+            effects.push({ type: 'splash', x: player.x, y: GROUND_Y, frame: 0, color: '#10b981' });
+          } else if (player.class === 'gunner') {
+            // [수정] 거너 1번 스킬 개틀링 포탑 유지시간 5초(300프레임)로 하향
+            summons.push({
+              id: frameCount, type: 'gatling_turret', x: player.x + 40 * player.direction, y: GROUND_Y, duration: 300, direction: player.direction, fireCooldown: 0, alive: true
+            });
+            effects.push({ type: 'splash', x: player.x + 40 * player.direction, y: GROUND_Y, frame: 0, color: '#64748b' });
+          }
+        }
+        if (player.skillFrame > 20) { 
+          player.isSkilling = false; 
+          // [수정] 기관총 쿨타임도 유지시간에 맞춰 5초(300프레임)로 단축
+          player.skillCooldown = player.class === 'gunner' ? 300 : 180; 
+        } 
+      }
+
+      // 궁극기 (R)
+      if (player.isUltimating) {
+        player.ultimateFrame++;
+        if (player.class === 'gunner') {
+          player.invincible = 5;
+          player.ultimateDuration--;
+          if (player.ultimateDuration <= 0) {
+            player.isUltimating = false;
+            setIsGunnerUltActive(false); 
+            player.ultimateCooldown = 1200; 
+          }
+        } else {
+          if (player.ultimateFrame === 20) {
+            if (player.class === 'knight') {
+              screenShake = 40; effects.push({ type: 'giant_king_sword', x: canvas.width / 2, y: -400, targetY: GROUND_Y, frame: 0 });
+              enemies.forEach(en => { if (en.alive) { en.hp -= 100; score += (en.type === 'reaper' ? 250 : (en.type === 'berserker' ? 150 : (en.type === 'archer' ? 40 : 20))); } });
+            } else if (player.class === 'wizard') {
+              screenShake = 15; 
+            } else if (player.class === 'necromancer') {
+              screenShake = 30;
+              summons.push({
+                id: frameCount, type: 'skeleton_giant', x: player.x, y: GROUND_Y, hp: 40, maxHp: 40, damage: 10, direction: player.direction, isMoving: true, isAttacking: false, attackFrame: 0, alive: true
+              });
+              effects.push({ type: 'splash', x: player.x, y: GROUND_Y, frame: 0, color: '#059669' });
+            }
+          }
+          
+          if (player.class === 'wizard' && player.ultimateFrame > 20 && player.ultimateFrame < 70 && player.ultimateFrame % 2 === 0) {
+            const lX = Math.random() * canvas.width;
+            effects.push({ type: 'lightning', x: lX, y: 0, targetY: GROUND_Y, frame: 0 });
+            screenShake = 6;
+            enemies.forEach(en => { if (en.alive && Math.abs(en.x - lX) < 70) { en.hp -= 20; en.invincible = 5; } });
+          }
+
+          if (player.ultimateFrame > 75) { player.isUltimating = false; player.ultimateCooldown = 1200; }
+        }
+      }
+
+      player.vy += player.gravity; player.y += player.vy;
+      if (player.y >= GROUND_Y) { player.y = GROUND_Y; player.vy = 0; player.isGrounded = true; }
+      player.x = Math.max(30, Math.min(canvas.width - 30, player.x));
+
+      // 투사체 처리
+      projectiles.forEach((p) => {
+        p.x += p.speed * p.dir;
+        if (p.vy !== undefined) { p.vy += p.gravity; p.y += p.vy; }
+        
+        if (p.type === 'crescent_wave') {
+          ctx.save(); ctx.shadowBlur = 25; ctx.shadowColor = '#60a5fa'; ctx.fillStyle = p.color; ctx.beginPath();
+          const angleOffset = p.dir === 1 ? 0 : Math.PI;
+          ctx.arc(p.x, p.y, Math.abs(p.radius), angleOffset - Math.PI/2, angleOffset + Math.PI/2);
+          ctx.quadraticCurveTo(p.x + (Math.abs(p.radius) * 0.4 * p.dir), p.y, p.x, p.y - Math.abs(p.radius)); ctx.fill(); ctx.restore();
+        } else if (p.type === 'enemy_arrow') {
+          ctx.strokeStyle = p.color; ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(p.x, p.y); ctx.lineTo(p.x - 15 * p.dir, p.y); ctx.stroke();
+        } else if (p.type === 'skull_magic') {
+          ctx.save(); ctx.shadowBlur = 15; ctx.shadowColor = '#10b981'; ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(p.x, p.y, Math.abs(p.radius), 0, Math.PI * 2); ctx.fill();
+          ctx.fillStyle = '#10b981'; ctx.beginPath(); ctx.arc(p.x - 2 * p.dir, p.y - 2, 2, 0, Math.PI*2); ctx.fill(); ctx.beginPath(); ctx.arc(p.x + 2 * p.dir, p.y - 2, 2, 0, Math.PI*2); ctx.fill(); ctx.restore();
+        } else if (p.type === 'bullet' || p.type === 'gatling_bullet') {
+          ctx.fillStyle = p.color;
+          ctx.fillRect(p.x, p.y - 2, 10 * p.dir, 4);
+        } else { 
+          ctx.fillStyle = p.color; ctx.beginPath(); ctx.arc(p.x, p.y, Math.abs(p.radius), 0, Math.PI * 2); ctx.fill(); 
+        }
+
+        // 플레이어 피격 (적 화살)
+        if (p.type === 'enemy_arrow' && player.alive && player.invincible <= 0) {
+          if (Math.abs(p.x - player.x) < 20 && Math.abs(p.y - (player.y - 40)) < 40) { player.hp -= 1; player.invincible = 20; p.dead = true; }
+        }
+
+        // 네크로맨서 소환수들이 화살을 대신 맞음
+        if (p.type === 'enemy_arrow' && !p.dead) {
+          summons.forEach(sum => {
+            if (sum.alive && (sum.type === 'skeleton_warrior' || sum.type === 'skeleton_giant') && !p.dead) {
+              const hitBoxWidth = sum.type === 'skeleton_giant' ? 40 : 20;
+              const hitBoxHeight = sum.type === 'skeleton_giant' ? 120 : 50;
+              if (Math.abs(p.x - sum.x) < hitBoxWidth && Math.abs(p.y - (sum.y - hitBoxHeight / 2)) < hitBoxHeight / 2) {
+                sum.hp -= 1; 
+                p.dead = true; 
+                effects.push({ type: 'splash', x: p.x, y: p.y, frame: 0, color: '#10b981' }); 
+              }
+            }
+          });
+        }
+
+        // 투사체와 적과의 충돌 판정
+        enemies.forEach(en => {
+          if (en.alive && Math.abs(p.x - en.x) < (p.type === 'crescent_wave' ? 60 : 40) && Math.abs(p.y - (en.y - 40)) < 60) {
+            if (p.type === 'crescent_wave') { 
+              if (en.invincible <= 0) { en.hp -= p.damage; en.invincible = 15; } 
+            } else if (p.type !== 'enemy_arrow') { 
+              en.hp -= p.damage; 
+              p.dead = true; 
+            }
+          }
+        });
+        if (p.y > GROUND_Y + 10 || p.x < -200 || p.x > canvas.width + 200) p.dead = true;
+      });
+      projectiles = projectiles.filter(p => !p.dead);
+
+      // 소환수 및 거너 개틀링 포탑 루프
+      summons.forEach((sum) => {
+        if (!sum.alive) return;
+
+        // 기관총 포탑 처리
+        if (sum.type === 'gatling_turret') {
+          sum.duration--;
+          if (sum.duration <= 0) {
+            sum.alive = false;
+            return;
+          }
+
+          let target = null;
+          let minDist = 9999;
+          enemies.forEach(en => {
+            if (en.alive) {
+              const dx = en.x - sum.x;
+              if ((sum.direction === 1 && dx > 0) || (sum.direction === -1 && dx < 0)) {
+                if (Math.abs(dx) < minDist) {
+                  minDist = Math.abs(dx);
+                  target = en;
+                }
+              }
+            }
+          });
+
+          // 주기적인 고속 개틀링 탄환 발사 (피해량 15)
+          if (sum.fireCooldown > 0) sum.fireCooldown--;
+          if (target && sum.fireCooldown <= 0) {
+            projectiles.push({
+              type: 'gatling_bullet',
+              x: sum.x + 20 * sum.direction,
+              y: sum.y - 47,
+              dir: sum.direction,
+              speed: 24,
+              damage: 15,
+              color: '#38bdf8'
+            });
+            effects.push({
+              type: 'muzzle_flash',
+              x: sum.x + 25 * sum.direction,
+              y: sum.y - 47,
+              frame: 0
+            });
+            sum.fireCooldown = 15;
+          }
+          drawSummon(sum, player.animFrame);
+          return;
+        }
+
+        // 일반 소환수 AI
+        let targetEnemy = null;
+        let minDist = 9999;
+        enemies.forEach(en => {
+          if (en.alive) {
+            const dist = Math.abs(en.x - sum.x);
+            if (dist < minDist) { minDist = dist; targetEnemy = en; }
+          }
+        });
+
+        if (targetEnemy) {
+          sum.direction = targetEnemy.x - sum.x > 0 ? 1 : -1;
+          const attackDist = sum.type === 'skeleton_giant' ? 100 : 50;
+
+          if (minDist > attackDist) {
+            sum.x += (sum.type === 'skeleton_giant' ? 1.5 : 2) * sum.direction;
+            sum.isMoving = true;
+          } else {
+            sum.isMoving = false;
+            if (!sum.isAttacking) { sum.isAttacking = true; sum.attackFrame = 0; }
+          }
+        } else {
+          sum.direction = player.x - sum.x > 0 ? 1 : -1;
+          if (Math.abs(player.x - sum.x) > 120) {
+            sum.x += (sum.type === 'skeleton_giant' ? 1.5 : 2) * sum.direction;
+            sum.isMoving = true;
+          } else { sum.isMoving = false; }
+        }
+
+        if (sum.isAttacking) {
+          sum.attackFrame++;
+          const actFrame = sum.type === 'skeleton_giant' ? 18 : 8;
+          if (sum.attackFrame === actFrame) {
+            enemies.forEach(en => {
+              const reach = sum.type === 'skeleton_giant' ? 110 : 60;
+              if (en.alive && Math.abs(en.x - sum.x) < reach) {
+                en.hp -= sum.damage;
+                en.invincible = 10;
+                en.x += 15 * sum.direction;
+                if (en.hp <= 0) { 
+                  en.alive = false; 
+                  score += (en.type === 'reaper' ? 250 : (en.type === 'berserker' ? 150 : (en.type === 'archer' ? 40 : 20))); 
+                }
+              }
+            });
+          }
+          const maxAtkFrame = sum.type === 'skeleton_giant' ? 35 : 18;
+          if (sum.attackFrame > maxAtkFrame) sum.isAttacking = false;
+        }
+
+        drawSummon(sum, player.animFrame);
+      });
+      summons = summons.filter(sum => sum.alive && (sum.hp === undefined || sum.hp > 0));
+
+      // 적 업데이트 및 공격 처리
+      enemies.forEach(en => {
+        if (!en.alive) return;
+        
+        let closestTarget = player;
+        let minDist = Math.abs(player.x - en.x);
+        
+        summons.forEach(sum => {
+          if (sum.alive && sum.type !== 'gatling_turret') { 
+            const dist = Math.abs(sum.x - en.x);
+            if (dist < minDist) { minDist = dist; closestTarget = sum; }
+          }
+        });
+
+        const distToTarget = closestTarget.x - en.x; en.direction = distToTarget > 0 ? 1 : -1;
+        const attackRange = en.type === 'archer' ? 320 : (en.type === 'reaper' ? 80 : 60);
+        
+        if (Math.abs(distToTarget) > attackRange || (en.type === 'archer' && Math.abs(distToTarget) < 200)) { 
+          en.x += en.speed * (Math.abs(distToTarget) < 200 && en.type === 'archer' ? -en.direction : en.direction); 
+        } 
+        else if (!en.isAttacking && closestTarget.alive) {
+          en.isAttacking = true; en.attackFrame = 0; en.burst = 1;
+        }
+        
+        if (en.isAttacking) {
+          en.attackFrame++;
+          const dist = Math.abs(closestTarget.x - en.x);
+          
+          if (en.type === 'melee') {
+            if (en.attackFrame === 10 && dist < 75) {
+              if (closestTarget === player) {
+                if (player.invincible <= 0) { player.hp -= 2; player.invincible = 40; }
+              } else { closestTarget.hp -= 2; }
+            }
+          } else if (en.type === 'archer') {
+            if (en.attackFrame === 10 && en.burst > 0) {
+              projectiles.push({ type: 'enemy_arrow', x: en.x, y: en.y - 50, dir: en.direction, speed: 8.5, color: '#c084fc' });
+              en.burst--;
+            }
+          } else if (en.type === 'berserker') {
+            if (en.attackFrame === 20) {
+              screenShake = 15;
+              effects.push({ type: 'splash', x: en.x + 60 * en.direction, y: GROUND_Y, frame: 0, color: '#ff0000' });
+              
+              if (closestTarget === player) {
+                if (player.invincible <= 0) {
+                  if (dist < 40) { player.hp -= 5; player.invincible = 50; screenShake = 30; } 
+                  else if (dist < 80) { player.hp -= 2; player.invincible = 40; } 
+                  else if (dist < 120) { player.stunned = 30; }
+                }
+              } else {
+                if (dist < 80) closestTarget.hp -= 10; 
+              }
+            }
+          } else if (en.type === 'reaper') {
+            if (en.attackFrame === 15) {
+              screenShake = 10;
+              effects.push({ type: 'splash', x: en.x + 50 * en.direction, y: GROUND_Y - 30, frame: 0, color: '#ef4444' });
+              if (closestTarget === player) {
+                if (player.invincible <= 0 && dist < 85) {
+                  player.hp -= 3; 
+                  player.invincible = 40;
+                }
+              } else {
+                if (dist < 85) closestTarget.hp -= 8; 
+              }
+            }
+          }
+          
+          const maxFrame = en.type === 'berserker' ? 60 : (en.type === 'archer' ? 70 : (en.type === 'reaper' ? 45 : 35)); 
+          if (en.attackFrame > maxFrame) en.isAttacking = false;
+        }
+
+        if (en.hp <= 0) { 
+          en.alive = false; 
+          score += (en.type === 'reaper' ? 250 : (en.type === 'berserker' ? 150 : (en.type === 'archer' ? 40 : 20))); 
+        }
+        
+        const enemyColor = en.type === 'berserker' ? '#f87171' : (en.type === 'archer' ? '#c084fc' : (en.type === 'reaper' ? '#4b5563' : '#94a3b8'));
+        drawStickman(en, player.animFrame, enemyColor);
+      });
+      enemies = enemies.filter(en => en.alive);
+
+      // 그래픽 이펙트 처리
+      effects.forEach((eff) => {
+        eff.frame++;
+        if (eff.type === 'giant_king_sword') {
+          const dropProgress = Math.min(1, eff.frame / 15); const currentY = eff.y + (eff.targetY - eff.y) * dropProgress;
+          ctx.save(); ctx.translate(eff.x, currentY); ctx.fillStyle = '#cbd5e1'; ctx.fillRect(-25, -400, 50, 400); ctx.beginPath(); ctx.moveTo(-25, 0); ctx.lineTo(25, 0); ctx.lineTo(0, 40); ctx.closePath(); ctx.fill(); ctx.fillStyle = '#facc15'; ctx.fillRect(-60, -400, 120, 20); ctx.fillStyle = '#78350f'; ctx.fillRect(-10, -460, 20, 60); ctx.restore();
+          if (eff.frame === 15) { screenShake = 50; effects.push({ type: 'splash', x: eff.x, y: GROUND_Y, frame: 0 }); }
+        } else if (eff.type === 'lightning') {
+          ctx.save(); ctx.strokeStyle = '#67e8f9'; ctx.lineWidth = 4; ctx.shadowBlur = 15; ctx.shadowColor = '#06b6d4'; ctx.beginPath(); ctx.moveTo(eff.x, 0);
+          let curY = 0; while(curY < eff.targetY) { curY += 20; ctx.lineTo(eff.x + (Math.random()-0.5)*30, curY); } ctx.stroke(); ctx.restore();
+          if (eff.frame === 1) effects.push({ type: 'splash', x: eff.x, y: eff.targetY, frame: 0 });
+        } else if (eff.type === 'splash') { 
+          ctx.strokeStyle = eff.color || '#fff'; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(eff.x, eff.y, Math.abs(eff.frame * 8), 0, Math.PI * 2); ctx.stroke(); 
+        } else if (eff.type === 'stone_spike') {
+          if (eff.delay > 0) { eff.delay--; return; }
+          if (eff.state === 'rising') {
+            eff.height += 10;
+            if (eff.height >= eff.maxHeight) {
+              eff.height = eff.maxHeight; eff.state = 'falling'; screenShake = Math.max(screenShake, 3);
+              enemies.forEach(en => { if (en.alive && Math.abs(en.x - eff.x) < 40 && !eff.hasDamaged) { en.hp -= eff.damage; en.invincible = 15; en.x += 15 * eff.dir; eff.hasDamaged = true; } });
+            }
+          } else if (eff.state === 'falling') {
+            eff.height -= 5; if (eff.height <= 0) { eff.height = 0; eff.dead = true; }
+          }
+          ctx.save(); ctx.fillStyle = '#57534e'; ctx.strokeStyle = '#a8a29e'; ctx.lineWidth = 2; ctx.shadowBlur = 10; ctx.shadowColor = 'rgba(0, 0, 0, 0.5)';
+          ctx.beginPath(); ctx.moveTo(eff.x - 18, GROUND_Y); ctx.lineTo(eff.x, GROUND_Y - eff.height); ctx.lineTo(eff.x + 18, GROUND_Y); ctx.closePath(); ctx.fill(); ctx.stroke(); ctx.restore();
+        } else if (eff.type === 'muzzle_flash') {
+          ctx.fillStyle = '#ff9f1c';
+          ctx.beginPath(); 
+          ctx.arc(eff.x, eff.y, Math.max(0, 8 - eff.frame), 0, Math.PI * 2); 
+          ctx.fill();
+        } else if (eff.type === 'snipe_laser') {
+          ctx.save();
+          ctx.strokeStyle = '#38bdf8';
+          ctx.shadowBlur = 30;
+          ctx.shadowColor = '#0284c7';
+          ctx.lineWidth = Math.max(1, 20 - eff.frame * 2);
+          ctx.beginPath();
+          ctx.moveTo(eff.x, 0);
+          ctx.lineTo(eff.x, GROUND_Y + 10);
+          ctx.stroke();
+          
+          ctx.fillStyle = 'rgba(56, 189, 248, 0.4)';
+          ctx.beginPath();
+          ctx.arc(eff.x, eff.y, Math.abs(eff.frame * 10), 0, Math.PI * 2);
+          ctx.fill();
+          ctx.restore();
+        }
+        if (eff.frame > 100) eff.dead = true;
+      });
+      effects = effects.filter(e => !e.dead);
+      
+      // 본체 그리기
+      drawStickman(player, player.animFrame, 'white');
+
+      // 거너 조준 스코프 렌더링
+      if (player.isUltimating && player.class === 'gunner') {
+        ctx.save();
+        ctx.strokeStyle = '#f43f5e';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(player.scopeX, player.scopeY, 50, 0, Math.PI*2);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(player.scopeX - 65, player.scopeY); ctx.lineTo(player.scopeX - 15, player.scopeY);
+        ctx.moveTo(player.scopeX + 15, player.scopeY); ctx.lineTo(player.scopeX + 65, player.scopeY);
+        ctx.moveTo(player.scopeX, player.scopeY - 65); ctx.lineTo(player.scopeX, player.scopeY - 15);
+        ctx.moveTo(player.scopeX, player.scopeY + 15); ctx.lineTo(player.scopeX, player.scopeY + 65);
+        ctx.stroke();
+        ctx.fillStyle = '#f43f5e';
+        ctx.beginPath();
+        ctx.arc(player.scopeX, player.scopeY, 3, 0, Math.PI*2);
+        ctx.fill();
+        ctx.restore();
+
+        ctx.fillStyle = '#fb7185';
+        ctx.font = 'bold 16px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText(`SNIPER ACTIVE: ${Math.ceil(player.ultimateDuration / 60)}s`, canvas.width / 2, 80);
+        ctx.textAlign = 'left';
+      }
+
+      ctx.restore();
+
+      // UI 렌더링
+      ctx.fillStyle = '#facc15'; ctx.font = 'bold 24px sans-serif'; ctx.textAlign = 'right'; ctx.fillText(`SCORE: ${score}`, canvas.width - 30, 45); 
+      ctx.textAlign = 'left'; ctx.fillStyle = 'white'; ctx.font = 'bold 16px sans-serif'; ctx.fillText('HP CONDITION', 20, 25);
+      const barX = 20; const barY = 35; const barW = 220; const barH = 24;
+      ctx.fillStyle = '#1e293b'; ctx.beginPath(); ctx.roundRect(barX, barY, barW, barH, 6); ctx.fill();
+      const hpRatio = Math.max(0, player.hp / player.maxHp);
+      const hpColor = hpRatio < 0.3 ? '#ef4444' : (hpRatio < 0.6 ? '#facc15' : '#10b981');
+      if (hpRatio > 0) { ctx.fillStyle = hpColor; ctx.beginPath(); ctx.roundRect(barX + 2, barY + 2, (barW - 4) * hpRatio, barH - 4, 4); ctx.fill(); }
+      ctx.fillStyle = 'white'; ctx.font = 'bold 12px monospace'; ctx.textAlign = 'center'; ctx.fillText(`${Math.max(0, Math.ceil(player.hp))} / ${player.maxHp}`, barX + barW/2, barY + 16);
+
+      const drawIcon = (x, label, cd, total, col) => {
+        const iy = 70; ctx.fillStyle = '#1e293b'; ctx.beginPath(); ctx.roundRect(x, iy, 44, 44, 10); ctx.fill(); ctx.strokeStyle = '#334155'; ctx.lineWidth = 2; ctx.stroke();
+        if (cd > 0) { ctx.fillStyle = 'rgba(15, 23, 42, 0.8)'; const h = (cd/total) * 44; ctx.fillRect(x, iy + (44 - h), 44, h); }
+        ctx.fillStyle = col; ctx.font = 'bold 18px sans-serif'; ctx.textAlign = 'center'; ctx.fillText(label, x + 22, iy + 28);
+      };
+      const maxSkillCd = player.class === 'gunner' ? 300 : 180; // 거너 쿨타임도 5초(300프레임)로 조정
+      drawIcon(20, '1', player.skillCooldown, maxSkillCd, '#38bdf8'); 
+      drawIcon(75, 'R', player.ultimateCooldown, 1200, '#fb7185');
+
+      if (player.stunned > 0) {
+        ctx.fillStyle = '#a855f7';
+        ctx.font = 'bold 16px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('STUNNED', player.x, player.y - 120);
+      }
+
+      if (player.hp <= 0) {
+        player.alive = false;
+        setFinalScore(score);
+        setIsGameOver(true);
+        cancelAnimationFrame(animationFrameId);
+        return;
+      }
+      animationFrameId = requestAnimationFrame(update);
+    };
+
+    update();
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('keyup', handleKeyUp);
+      cancelAnimationFrame(animationFrameId);
+    };
+  }, [view, selectedClass]);
+
+  if (view === 'class_select') {
+    return (
+      <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-center p-4 text-white font-sans">
+        <h2 className="text-4xl font-black mb-12 tracking-tight">전투 스타일을 선택하세요</h2>
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 w-full max-w-7xl px-4">
+          {/* Knight */}
+          <div onClick={() => { setSelectedClass('knight'); setView('game_play'); setIsGameOver(false); }} className="bg-slate-800 border-4 border-slate-700 hover:border-yellow-500 rounded-3xl p-6 cursor-pointer transition-all hover:scale-105 group flex flex-col justify-between">
+            <div>
+              <div className="w-16 h-16 bg-yellow-500/20 rounded-2xl flex items-center justify-center mb-6 group-hover:bg-yellow-500/40 transition-colors">
+                <Sword size={36} className="text-yellow-500" />
+              </div>
+              <div className="flex justify-between items-center mb-2">
+                <h3 className="text-2xl font-bold">검사</h3>
+                <span className="bg-yellow-600/30 text-yellow-400 border border-yellow-500/40 text-[10px] px-2 py-0.5 rounded-full font-semibold uppercase">HP 20 UP</span>
+              </div>
+              <p className="text-slate-400 italic mb-4 text-sm">안정적인 근접 타격의 제왕.</p>
+              <ul className="space-y-2 text-xs text-slate-300">
+                <li>• <span className="text-yellow-500 font-bold">특징:</span> 압도적 체력(20) / 강력한 근접 데미지(10)</li>
+                <li>• <span className="text-blue-400 font-bold">1번 스킬:</span> 초승달 파동베기</li>
+                <li>• <span className="text-rose-400 font-bold">궁극기:</span> 제왕의 대검</li>
+              </ul>
+            </div>
+            <div className="mt-6 text-yellow-500 text-xs font-bold uppercase tracking-widest text-center">선택하기</div>
+          </div>
+          {/* Wizard */}
+          <div onClick={() => { setSelectedClass('wizard'); setView('game_play'); setIsGameOver(false); }} className="bg-slate-800 border-4 border-slate-700 hover:border-purple-500 rounded-3xl p-6 cursor-pointer transition-all hover:scale-105 group flex flex-col justify-between">
+            <div>
+              <div className="w-16 h-16 bg-purple-500/20 rounded-2xl flex items-center justify-center mb-6 group-hover:bg-purple-500/40 transition-colors">
+                <Wand2 size={36} className="text-purple-500" />
+              </div>
+              <div className="flex justify-between items-center mb-2">
+                <h3 className="text-2xl font-bold">마법사</h3>
+                <span className="bg-purple-600/30 text-purple-400 border border-purple-500/40 text-[10px] px-2 py-0.5 rounded-full font-semibold uppercase">HP 15 UP</span>
+              </div>
+              <p className="text-slate-400 italic mb-4 text-sm">원거리 대미지와 유동성 확보.</p>
+              <ul className="space-y-2 text-xs text-slate-300">
+                <li>• <span className="text-purple-500 font-bold">특징:</span> 단단해진 체력(15) / 파이어볼(9)</li>
+                <li>• <span className="text-blue-400 font-bold">1번 스킬:</span> 대지가시 솟구침</li>
+                <li>• <span className="text-rose-400 font-bold">궁극기:</span> 전격 세례</li>
+              </ul>
+            </div>
+            <div className="mt-6 text-purple-500 text-xs font-bold uppercase tracking-widest text-center">선택하기</div>
+          </div>
+          {/* Necromancer */}
+          <div onClick={() => { setSelectedClass('necromancer'); setView('game_play'); setIsGameOver(false); }} className="bg-slate-800 border-4 border-slate-700 hover:border-emerald-500 rounded-3xl p-6 cursor-pointer transition-all hover:scale-105 group flex flex-col justify-between">
+            <div>
+              <div className="w-16 h-16 bg-emerald-500/20 rounded-2xl flex items-center justify-center mb-6 group-hover:bg-emerald-500/40 transition-colors">
+                <Skull size={36} className="text-emerald-400" />
+              </div>
+              <div className="flex justify-between items-center mb-2">
+                <h3 className="text-2xl font-bold">네크로맨서</h3>
+                <span className="bg-emerald-600/30 text-emerald-400 border border-emerald-500/40 text-[10px] px-2 py-0.5 rounded-full font-semibold uppercase">Glass Cannon</span>
+              </div>
+              <p className="text-slate-400 italic mb-4 text-sm">해골 소환수와 혼들의 지배자.</p>
+              <ul className="space-y-2 text-xs text-slate-300">
+                <li>• <span className="text-emerald-400 font-bold">특징:</span> 극단적 체력(5) / 마도 해골(9)</li>
+                <li>• <span className="text-blue-400 font-bold">1번 스킬:</span> 해골 방패 전사 2마리 소환 (HP 10)</li>
+                <li>• <span className="text-rose-400 font-bold">궁극기:</span> 해골 거인 강림 (HP 40, 대미지 10)</li>
+              </ul>
+            </div>
+            <div className="mt-6 text-emerald-400 text-xs font-bold uppercase tracking-widest text-center">선택하기</div>
+          </div>
+          {/* Gunner */}
+          <div onClick={() => { setSelectedClass('gunner'); setView('game_play'); setIsGameOver(false); }} className="bg-slate-800 border-4 border-slate-700 hover:border-rose-500 rounded-3xl p-6 cursor-pointer transition-all hover:scale-105 group flex flex-col justify-between">
+            <div>
+              <div className="w-16 h-16 bg-rose-500/20 rounded-2xl flex items-center justify-center mb-6 group-hover:bg-rose-500/40 transition-colors">
+                <Target size={36} className="text-rose-400" />
+              </div>
+              <div className="flex justify-between items-center mb-2">
+                <h3 className="text-2xl font-bold">거너</h3>
+                <span className="bg-rose-600/30 text-rose-400 border border-rose-500/40 text-[10px] px-2 py-0.5 rounded-full font-semibold uppercase">GLASS HP 5</span>
+              </div>
+              <p className="text-slate-400 italic mb-4 text-sm">첨단 중화기와 가속 격발의 수호자.</p>
+              <ul className="space-y-2 text-xs text-slate-300">
+                <li>• <span className="text-rose-400 font-bold">특징:</span> 패치된 체력(5) / 권총 사격(10)</li>
+                <li>• <span className="text-blue-400 font-bold">1번 스킬:</span> 5초 개틀링 머신 소환(15)</li>
+                <li>• <span className="text-rose-500 font-bold">궁극기:</span> 10초 무제한 저격 스나이핑(30)</li>
+              </ul>
+            </div>
+            <div className="mt-6 text-rose-400 text-xs font-bold uppercase tracking-widest text-center">선택하기</div>
+          </div>
+        </div>
+        <button onClick={() => setView('game_lobby')} className="mt-12 text-slate-500 hover:text-white underline transition-colors">로비로 돌아가기</button>
+      </div>
+    );
+  }
+
+  if (view === 'game_play') {
+    return (
+      <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-center p-4 font-sans text-white">
+        <div className="w-full max-w-4xl flex justify-between items-center mb-4 px-2">
+          <button onClick={() => setView('game_lobby')} className="px-4 py-2 bg-slate-800 rounded-xl text-slate-300 hover:bg-slate-700 transition-all text-xs font-bold uppercase tracking-widest">게임 종료</button>
+          <div className="flex items-center space-x-2 text-rose-500 font-black uppercase tracking-tighter bg-rose-500/10 px-4 py-2 rounded-xl border border-rose-500/20">
+            <Zap size={16} fill="currentColor" />
+            <span>{selectedClass === 'knight' ? 'Knight Mode' : selectedClass === 'wizard' ? 'Wizard Mode' : selectedClass === 'necromancer' ? 'Necromancer Mode' : 'Gunner Mode'}</span>
+          </div>
+        </div>
+        <div className="relative rounded-3xl overflow-hidden border-8 border-slate-800 shadow-2xl bg-slate-900 group">
+          <canvas ref={canvasRef} width={800} height={500} className="max-w-full h-auto block" />
+          
+          {isGameOver && (
+            <div className="absolute inset-0 bg-slate-950/90 flex flex-col items-center justify-center animate-in fade-in duration-500">
+              <h2 className="text-5xl font-black text-rose-500 mb-2 italic tracking-tighter">MISSION FAILED</h2>
+              <p className="text-slate-400 mb-1">최종 점수: <span className="text-yellow-500 font-bold">{finalScore}</span></p>
+              <div className="flex space-x-4 mt-8">
+                <button 
+                  onClick={restartGame}
+                  className="flex items-center space-x-2 px-8 py-4 bg-indigo-600 hover:bg-indigo-500 rounded-2xl font-bold transition-all hover:scale-105 active:scale-95 shadow-lg"
+                >
+                  <RefreshCw size={20} />
+                  <span>다시 시도</span>
+                </button>
+                <button onClick={() => setView('game_lobby')} className="px-8 py-4 bg-slate-800 hover:bg-slate-700 rounded-2xl font-bold transition-all text-slate-400 hover:text-white">로비로 이동</button>
+              </div>
+            </div>
+          )}
+        </div>
+        <div className="mt-4 text-slate-400 text-xs text-center leading-relaxed">
+          {selectedClass === 'gunner' && isGunnerUltActive ? (
+            <span className="text-rose-400 font-bold text-sm bg-rose-950/40 px-4 py-2 rounded-lg border border-rose-800 animate-pulse">
+              [궁극기 저격 모드 활성화] WASD 키로 조준선을 이동하고 E 키를 눌러 저격 사격을 연사하세요! (10초 유지)
+            </span>
+          ) : (
+            <span>[A/D]: 이동 | [Space]: 점프 | [Q]: 대시/무적 | [E]: 일반 공격 | [1]: 스킬 | [R]: 궁극기</span>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-slate-900 flex items-center justify-center p-4 text-white font-sans">
+      <div className="max-w-md w-full bg-slate-800 rounded-3xl shadow-2xl border-4 border-slate-700 p-10 flex flex-col items-center">
+        <div className="p-4 bg-indigo-600 rounded-2xl mb-6 shadow-xl shadow-indigo-500/20 animate-bounce"><Sword size={48} className="transform -rotate-45" /></div>
+        <h1 className="text-4xl font-black italic mb-2 tracking-tighter uppercase">Stick Heroes</h1>
+        <p className="text-slate-400 mb-10 text-center font-medium leading-relaxed">최첨단 원거리 스킬의 달인,<br/>신규 클래스 <span className="text-rose-400 font-bold underline">거너</span>가 전장에 동참했습니다!</p>
+        <button onClick={() => setView('class_select')} className="w-full bg-indigo-600 hover:bg-indigo-500 py-5 rounded-2xl font-black text-xl transition-all hover:scale-105 active:scale-95 shadow-xl flex items-center justify-center space-x-2 border-b-4 border-indigo-800">
+          <Play fill="currentColor" size={24} />
+          <span>전투 시작</span>
+        </button>
+      </div>
+    </div>
+  );
+};
+
+export default App;
